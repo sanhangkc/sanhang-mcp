@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sanhang-mcp"
+version = "1.0.0"
+description = "MCP server that turns one sentence of math into a Manim animation video, rendered on a hosted backend (no local Manim or LaTeX)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "三行弦图 MathMagic" }]
+keywords = [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "manim",
+    "math",
+    "animation",
+    "mathmagic",
+    "sanhang",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://sanhangmath.top"
+Repository = "https://github.com/sanhangkc/sanhang-mcp"
+Issues = "https://github.com/sanhangkc/sanhang-mcp/issues"
+Changelog = "https://github.com/sanhangkc/sanhang-mcp/releases"
+
+[project.scripts]
+sanhang-mcp = "sanhang_mcp:main"
+
+[tool.setuptools]
+py-modules = ["sanhang_mcp"]
