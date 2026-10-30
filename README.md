@@ -42,6 +42,31 @@ brew install uv
 
 2. 能访问 sanhangmath.top。
 
+### 三种安装方式
+
+默认推荐 PyPI，一条命令，不需要下载任何文件：
+
+```bash
+uvx sanhang-mcp --version
+```
+
+PyPI 走不通时（例如公司网络限制），可以直接从 GitHub 仓库装，效果一样：
+
+```bash
+# 指定版本标签，可复现
+uvx --from "git+https://github.com/sanhangkc/sanhang-mcp@v1.0.0" sanhang-mcp --version
+# 跟随 main 分支
+uvx --from git+https://github.com/sanhangkc/sanhang-mcp sanhang-mcp --version
+```
+
+内网或 GitHub 也受限时，把源码包下载下来直接跑，零第三方依赖：
+
+```bash
+python3 sanhang_mcp.py --version
+```
+
+三种方式装出来的都是同一个版本，配置文件里的差异只在 command 与 args：用 PyPI 就写 uvx sanhang-mcp，用 GitHub 就把 git+https 地址写进 args。
+
 ### 先自检，再接入
 
 终端里跑一次，确认后端通、环境也对：
