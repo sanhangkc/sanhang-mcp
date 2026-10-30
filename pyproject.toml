@@ -9,7 +9,9 @@ description = "MCP server that turns one sentence of math into a Manim animation
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-authors = [{ name = "三行弦图 MathMagic" }]
+authors = [
+    { name = "三行弦图 MathMagic", email = "zengbowengood@163.com" },
+]
 keywords = [
     "mcp",
     "mcp-server",
