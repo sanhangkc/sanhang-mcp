@@ -96,6 +96,14 @@ Cursor，配置文件 ~/.cursor/mcp.json，格式同上。DeepSeek harness、Cli
 
 没装 uv 的话，把 command 换成 python3，args 换成 sanhang_mcp.py 的绝对路径。Windows 上必须写 python.exe 的绝对路径，相对路径会启动失败。
 
+macOS 上有个必踩的坑要提前说：从 Finder 或程序坞启动的图形客户端（Claude Desktop、WorkBuddy、Cursor）拿到的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin，不含 ~/.local/bin 和 /opt/homebrew/bin。所以 command 写 uvx 会启动失败，必须写绝对路径，用 which uvx 查一下你的实际位置：
+
+| 安装方式 | command 应该写 |
+| Homebrew | /opt/homebrew/bin/uvx |
+| 官方脚本 curl 安装 | /Users/<你的用户名>/.local/bin/uvx |
+
+Windows 同理，写 uvx.exe 的完整路径。
+
 想固定配额标识（例如一台机器多人共用、或想让用量归到自己名下），加一段 env：
 
 ```json
