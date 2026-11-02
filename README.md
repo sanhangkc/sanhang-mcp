@@ -117,7 +117,29 @@ Claude Desktop，配置文件 claude_desktop_config.json（macOS 在 ~/Library/A
 }
 ```
 
-Cursor，配置文件 ~/.cursor/mcp.json，格式同上。DeepSeek harness、Cline、Continue 等只要支持 stdio MCP，写法一致。
+Cursor，配置文件 ~/.cursor/mcp.json，格式同上。Cline、Continue 等只要支持 stdio MCP，写法一致。
+
+命令行类 Agent 也是同一份 JSON，只是落地位置不同。ZCode（智谱）与 DeepSeek harness（dsh）都认 Claude Code 那套 mcpServers 结构，所以一份文件两边通用。
+
+ZCode：设置 -> MCP 服务器 -> 新建 MCP 服务器，作用域选用户级或工作区级，类型选 stdio，命令填 uvx，参数填 sanhang-mcp。也可以直接写文件：用户级 ~/.zcode/cli/config.json（键 mcp.servers）、工作区级 .zcode/config.json，或者放通用格式 ~/.agents/mcp.json。注意 ZCode 的优先规则是同一作用域里 .zcode 原生配置一旦有内容，同目录 .agents/mcp.json 整份被跳过，不合并。
+
+DeepSeek harness：dsh 本身不带项目级 MCP 发现，需要装 dsh-mcp-adapter 或 dsh-plugin-mcp-json 这类插件，之后读 ~/.agents/mcp.json（用户全局）、.mcp.json（项目级）、~/.dsh/mcp.json（dsh 全局覆盖），格式同样是 mcpServers。装了 dsh-mcp-adapter 的会话里也可以直接发命令：/mcp add sanhang-mcp command=uvx args=sanhang-mcp。
+
+把下面这份写到 ~/.agents/mcp.json，ZCode 和 dsh 都能扫到：
+
+```json
+{
+  "mcpServers": {
+    "sanhang-mcp": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["sanhang-mcp"]
+    }
+  }
+}
+```
+
+两个客户端的特有坑：ZCode 的设置里如果勾选了「可用工具」，会变成白名单模式，MCP 工具一个都进不来，要留空继承全部；dsh 子智能体只能看到主会话启动时已连上的服务，改完配置要新开会话。
 
 没装 uv 的话，把 command 换成 python3，args 换成 sanhang_mcp.py 的绝对路径。Windows 上必须写 python.exe 的绝对路径，相对路径会启动失败。
 
