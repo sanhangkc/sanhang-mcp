@@ -145,7 +145,7 @@ def run_protocol_tests(client):
     check('返回 result 而非 error', 'result' in resp, resp.get('error'))
     check('protocolVersion 协商为 2025-06-18', result.get('protocolVersion') == '2025-06-18',
           result.get('protocolVersion'))
-    check('serverInfo.name == manim-mcp',
+    check('serverInfo.name == sanhang-mcp',
           (result.get('serverInfo') or {}).get('name') == 'sanhang-mcp',
           result.get('serverInfo'))
     check('声明 tools 能力', 'tools' in (result.get('capabilities') or {}), result.get('capabilities'))

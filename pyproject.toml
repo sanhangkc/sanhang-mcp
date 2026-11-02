@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sanhang-mcp"
-version = "1.0.0"
-description = "MCP server that turns one sentence of math into a Manim animation video, rendered on a hosted backend (no local Manim or LaTeX)"
+version = "1.1.0"
+description = "MCP server that turns one sentence of math into a Manim animation video. Default connects to no server; use your own DeepSeek key + local Manim, or point SANHANG_BASE_URL at your own backend."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }

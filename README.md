@@ -4,11 +4,11 @@
 
 三行弦图（MathMagic）的 MCP 服务。把一句自然语言的数学描述，渲染成一段 Manim 动画视频，返回可直接播放的 mp4 链接和可复用的 Manim 代码。
 
-和其他 manim 系 MCP 最大的区别：本机不需要安装 Manim、LaTeX、ffmpeg，也不需要显卡。渲染在托管后端完成，本地只跑一个纯标准库的 Python 进程。
+和其他 manim 系 MCP 最大的区别：默认不需要连接任何服务器、也不消耗作者资源。三种模式任选：后端模式（渲染在你自己的或三行弦图托管后端完成，本地只跑纯标准库进程）、本地模式（用你自己的 DeepSeek Key + 本机 Manim 出片）、未配置（启动即提示如何配置，绝不偷偷连回作者服务器）。
 
 - 输入：一句话，例如「画出 y=sin(x) 在 0 到 2π 上的图像，用一个红点演示它随 x 增大而运动」
 - 输出：mp4 直链 + 封面图 + 完整 Manim 代码 + 渲染耗时
-- 依赖：Python 3.8 及以上，能访问 sanhangmath.top，仅此两项
+- 依赖：Python 3.8 及以上（后端 / 本地模式各有额外依赖，见「运行模式」一节）
 
 ## 为什么单独做一个
 
@@ -40,7 +40,9 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 brew install uv
 ```
 
-2. 能访问 sanhangmath.top。
+2. 选一种渲染来源（二选一，都不设也能启动，只是调用工具时会提示怎么配）：
+   - 后端模式：准备一个后端地址（你的自建服务，或三行弦图托管服务 https://sanhangmath.top/api）。
+   - 本地模式：本机装好 Manim + ffmpeg，并准备一个你自己的 DeepSeek API Key。
 
 ### 三种安装方式
 
@@ -76,7 +78,7 @@ uvx sanhang-mcp --check
 uvx sanhang-mcp --whoami
 ```
 
-前者看到 OK https://sanhangmath.top/api -> {"status": "healthy", ...} 就说明通；后者打印你的配额标识（首次运行自动生成，存在 ~/.sanhang-mcp/identifier，不需要手动配置）。
+backend 模式看到 OK https://你的后端/api -> {"status": "healthy", ...} 就说明通；local 模式会检查 manim / ffmpeg / DeepSeek Key 是否齐全；none 模式会打印配置指引。--whoami 打印当前模式与配额标识（首次运行自动生成，存在 ~/.sanhang-mcp/identifier，不需要手动配置）。
 
 注意这里的终端命令只是自检用。真正使用是把下一节的配置写进客户端，让客户端去拉起这个进程；不需要在终端里常驻运行。
 
@@ -86,6 +88,41 @@ uvx sanhang-mcp --whoami
 python3 sanhang_mcp.py --check
 python3 sanhang_mcp.py --version
 ```
+
+## 运行模式（重要）
+
+从 v1.1.0 起，本包**默认不连接任何服务器，也不会消耗作者的算力或 token**。这一点对公开分发很关键——任何人 `uvx sanhang-mcp` 拉下来，不做任何配置只会得到清晰的配置指引，不会偷连回作者的服务器。
+
+三种模式由环境变量决定：
+
+### 1. 本地模式（推荐给想完全自控的人）
+
+用自己的 DeepSeek API Key 让模型出 Manim 代码，再用自己机器上的 Manim 渲染，视频落在本地文件。全程不经过作者服务器，也不花作者一分钱。
+
+```bash
+export SANHANG_LOCAL=1
+export SANHANG_DEEPSEEK_API_KEY=sk-你的key
+uvx sanhang-mcp
+```
+
+前置：本机装好 `manim` 与 `ffmpeg`（`pip install manim` 一般会带 ffmpeg 依赖），以及一个你自己的 DeepSeek Key。渲染失败时会自动把报错回喂模型重试一次。
+
+### 2. 后端模式（连接你自己的后端）
+
+把 `SANHANG_BASE_URL` 指向你自建的服务，或三行弦图托管服务：
+
+```bash
+export SANHANG_BASE_URL=https://sanhangmath.top/api
+uvx sanhang-mcp
+```
+
+后端模式才有任务轮询（sanhang_task）、社区画廊（sanhang_gallery）、配额统计与会员能力。
+
+### 3. 未配置（none）
+
+什么都不设就启动，调用工具时统一返回一段指引，告诉你该开本地模式还是配后端。
+
+确认当前模式：`uvx sanhang-mcp --whoami`。
 
 ## 接入客户端
 
@@ -98,7 +135,10 @@ WorkBuddy，配置文件 ~/.workbuddy/mcp.json：
   "mcpServers": {
     "sanhang-mcp": {
       "command": "uvx",
-      "args": ["sanhang-mcp"]
+      "args": ["sanhang-mcp"],
+      "env": {
+        "SANHANG_BASE_URL": "https://你的后端/api"
+      }
     }
   }
 }
@@ -111,7 +151,10 @@ Claude Desktop，配置文件 claude_desktop_config.json（macOS 在 ~/Library/A
   "mcpServers": {
     "sanhang-mcp": {
       "command": "uvx",
-      "args": ["sanhang-mcp"]
+      "args": ["sanhang-mcp"],
+      "env": {
+        "SANHANG_BASE_URL": "https://你的后端/api"
+      }
     }
   }
 }
@@ -188,12 +231,18 @@ sanhang_task({ "task_id": "...", "action": "wait", "max_wait_seconds": 300 })
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| SANHANG_BASE_URL | https://sanhangmath.top/api | 渲染后端地址 |
-| SANHANG_USER_IDENTIFIER | 本机自动生成 | 配额与归属标识。不设时首次运行生成 mcp-xxxxxxxx 并落盘复用；多人共用一台机器时才需要手动指定 |
+| SANHANG_BASE_URL | 空（不默认连任何服务器） | 渲染后端地址。设了就是 backend 模式；不设且没开本地模式则启动即提示配置。**默认空**，所以公开分发不会偷连作者服务器 |
+| SANHANG_LOCAL | 空（关） | 设为 1/true 开启本地模式：用你自己的 DeepSeek Key 出码 + 本机 Manim 渲染，全程不访问作者服务器 |
+| SANHANG_DEEPSEEK_API_KEY | 空 | 本地模式必填，你自己的 DeepSeek API Key（也可写 DEEPSEEK_API_KEY） |
+| SANHANG_DEEPSEEK_BASE_URL | https://api.deepseek.com/chat/completions | 本地模式调的 DeepSeek 端点，一般不用改 |
+| SANHANG_LOCAL_MODEL | deepseek-chat | 本地模式出码用的模型 |
+| SANHANG_LOCAL_QUALITY | m | 本地渲染清晰度：l / m / h / k |
+| SANHANG_LOCAL_TIMEOUT | 600 | 本地单次渲染超时（秒） |
+| SANHANG_USER_IDENTIFIER | 本机自动生成 | 配额与归属标识（仅后端模式生效）。不设时首次运行生成 mcp-xxxxxxxx 并落盘复用；多人共用一台机器时才需要手动指定 |
 | SANHANG_STATE_DIR | ~/.sanhang-mcp | 本机标识的存放目录，容器或只读环境可改到可写路径 |
-| SANHANG_WAIT | 240 | 默认阻塞等待上限（秒） |
-| SANHANG_POLL_INTERVAL | 3 | 轮询间隔（秒） |
-| SANHANG_HTTP_TIMEOUT | 30 | 单次 HTTP 超时（秒） |
+| SANHANG_WAIT | 240 | 默认阻塞等待上限（秒，仅后端模式） |
+| SANHANG_POLL_INTERVAL | 3 | 轮询间隔（秒，仅后端模式） |
+| SANHANG_HTTP_TIMEOUT | 30 | 单次 HTTP 超时（秒，仅后端模式） |
 | SANHANG_LOG | 开 | 设为 0 关闭 stderr 日志 |
 
 旧版 MANIM_MCP_ 前缀仍然可用，两个前缀同时出现时 SANHANG_ 优先。

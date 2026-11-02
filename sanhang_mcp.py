@@ -4,21 +4,28 @@
 
 把一句自然语言数学描述，变成一段可以播放的 Manim 动画视频。
 
+三种运行模式（默认不连接任何服务器，也不消耗作者资源）：
+- 本地模式（SANHANG_LOCAL=1）：用你自己的 DeepSeek API Key 出码，用你本机的
+  Manim 渲染，视频落在本地文件，全程不访问作者服务器。
+- 后端模式（SANHANG_BASE_URL=你的后端）：连接你自建或三行弦图托管后端。
+- 未配置（none）：启动即提示如何配置，绝不偷偷连回作者服务器。
+
 设计取向：零第三方依赖（只用 Python 标准库）、stdio 传输、Python 3.8+。
-不要求本地装 Manim / LaTeX / ffmpeg —— 渲染发生在远端，客户端只拿 URL。
 
 协议：Model Context Protocol 2025-06-18（向下兼容 2025-03-26 / 2024-11-05）。
 传输：stdio，一行一条 JSON-RPC 消息；stdout 只写 MCP 消息，日志一律走 stderr。
 
 用法：
     python3 sanhang_mcp.py            # 作为 MCP server 被客户端拉起
-    python3 sanhang_mcp.py --check    # 探活后端，打印一行结果后退出
-    python3 sanhang_mcp.py --whoami   # 查看当前使用的配额标识
+    python3 sanhang_mcp.py --check    # 自检（按当前模式检查后端 / 本地依赖）
+    python3 sanhang_mcp.py --whoami   # 查看当前模式与配额标识
     python3 sanhang_mcp.py --version
 """
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -29,17 +36,40 @@ import urllib.request
 import uuid
 
 SERVER_NAME = 'sanhang-mcp'
-SERVER_VERSION = '1.0.0'
+SERVER_VERSION = '1.1.0'
 
 # 支持的协议版本，索引 0 为服务端最新
 PROTOCOL_VERSIONS = ('2025-06-18', '2025-03-26', '2024-11-05')
 LATEST_PROTOCOL = PROTOCOL_VERSIONS[0]
 
-DEFAULT_BASE_URL = 'https://sanhangmath.top/api'
+# 默认空：本包不内置任何后端地址，不会偷偷连回作者服务器，也不会消耗作者
+# 的算力或 token。使用者要么开本地模式（SANHANG_LOCAL=1），要么自己指定后端
+# （SANHANG_BASE_URL=...）。这是 v1.1.0 起的关键改动。
+DEFAULT_BASE_URL = ''
+DEEPSEEK_DEFAULT_URL = 'https://api.deepseek.com/chat/completions'
 # 配额标识的兜底值：仅当本机标识无法生成也无法落盘时才会用到。
 # 正常情况下由 _local_identifier() 在使用者机器上首次运行生成并落盘复用。
 FALLBACK_USER_IDENTIFIER = 'mcp-client'
 STATE_DIRNAME = '.sanhang-mcp'
+
+# 未配置后端也未开本地模式时，所有工具统一报这个错。明确告诉使用者：本包
+# 默认不连任何服务器，两种用法二选一。
+_CONFIG_ERROR = (
+    '未配置渲染后端，也未开启本地模式，无法生成弦图。\n'
+    '\n'
+    'sanhang-mcp 默认不会连接任何服务器，也不会消耗作者的算力或 token。\n'
+    '两种用法二选一：\n'
+    '\n'
+    '1) 本地模式（用你自己的 DeepSeek Key + 本机 Manim，全程不访问外部服务器）：\n'
+    '   export SANHANG_LOCAL=1\n'
+    '   export SANHANG_DEEPSEEK_API_KEY=sk-你的key\n'
+    '   uvx sanhang-mcp\n'
+    '\n'
+    '2) 连接你自己的后端 / 三行弦图托管服务：\n'
+    '   export SANHANG_BASE_URL=https://你的后端/api\n'
+    '\n'
+    '详见 README 的「本地模式」与「自备后端」两节。'
+)
 
 # 渲染轮询：单次询问的 HTTP 超时 / 轮询间隔 / 默认最长等待
 DEFAULT_HTTP_TIMEOUT = 30.0
@@ -120,11 +150,28 @@ def log(message):
         pass
 
 
+def _resolve_mode():
+    """运行模式：local（自备 key + 本地 Manim）/ backend（自建或托管后端）/ none（未配置）。
+
+    判定顺序：SANHANG_LOCAL 真值优先；其次看 SANHANG_BASE_URL 是否非空；
+    都没有就是 none，所有工具返回 _CONFIG_ERROR 而不会偷偷连回作者服务器。
+    """
+    if _getenv('LOCAL').lower() in ('1', 'true', 'yes', 'on'):
+        return 'local'
+    if (_getenv('BASE_URL') or '').strip():
+        return 'backend'
+    return 'none'
+
+
 class Config(object):
     """运行期配置，全部来自环境变量（便于 MCP 客户端用 env 段注入）。"""
 
     def __init__(self):
-        self.base_url = (_getenv('BASE_URL') or DEFAULT_BASE_URL).rstrip('/')
+        self.mode = _resolve_mode()
+        if self.mode == 'backend':
+            self.base_url = _getenv('BASE_URL').strip().rstrip('/')
+        else:
+            self.base_url = ''
         self.user_identifier = _getenv('USER_IDENTIFIER') or _local_identifier()
         self.http_timeout = _env_float('HTTP_TIMEOUT', DEFAULT_HTTP_TIMEOUT, 3.0, 120.0)
         self.poll_interval = _env_float('POLL_INTERVAL', DEFAULT_POLL_INTERVAL, 1.0, 30.0)
@@ -431,6 +478,10 @@ def _tool_generate(args, ctx):
     if not isinstance(prompt, str) or not prompt.strip():
         return _error('参数 prompt 必填，且必须是非空字符串。')
     prompt = prompt.strip()
+    if CONFIG.mode == 'local':
+        return _tool_generate_local(args, ctx)
+    if CONFIG.mode == 'none':
+        return _error(_CONFIG_ERROR)
     if len(prompt) > 1000:
         return _error('参数 prompt 过长（后端上限 1000 字符），请精简到一句可执行的动画描述。')
 
@@ -488,6 +539,12 @@ def _tool_generate(args, ctx):
 
 
 def _tool_task(args, ctx):
+    if CONFIG.mode == 'none':
+        return _error(_CONFIG_ERROR)
+    if CONFIG.mode == 'local':
+        return _error(
+            '本地模式下渲染是同步完成的，没有后台任务，sanhang_task 不可用。'
+            '直接调用 sanhang_render 即可得到本地视频文件。')
     task_id = (args.get('task_id') or '').strip()
     if not task_id:
         return _error('参数 task_id 必填。')
@@ -534,6 +591,12 @@ def _tool_task(args, ctx):
 
 
 def _tool_gallery(args, ctx):
+    if CONFIG.mode == 'none':
+        return _error(_CONFIG_ERROR)
+    if CONFIG.mode == 'local':
+        return _error(
+            '本地模式不连接社区画廊，不会访问任何服务器。'
+            '如需浏览公开作品，请配置 SANHANG_BASE_URL 指向一个后端。')
     params = {
         'page': _clamp_int(args.get('page'), 1, 1, 100),
         'page_size': _clamp_int(args.get('page_size'), 10, 1, 50),
@@ -597,6 +660,199 @@ def _error(message, extra=None):
     if extra:
         structured.update(extra)
     return message, structured, True
+
+
+# --------------------------------------------------------------------------- #
+# 本地模式：用户自备 DeepSeek Key + 本机 Manim 渲染，全程不访问作者服务器
+# --------------------------------------------------------------------------- #
+_SYSTEM_GEN = (
+    '你是一个 Manim 社区版代码生成器。'
+    '只输出一个 Python 文件内容：定义一个名为 MainScene 的 Scene 子类，'
+    '可被 `manim -qm scene.py MainScene` 直接渲染通过。'
+    '不要任何解释，不要使用 markdown 代码块包裹，直接输出纯 Python 代码。'
+    '使用标准 Manim 社区版 API（如 axes.plot、self.play、MathTex 等），'
+    '不要引用外部资源或网络下载。'
+)
+
+_SYSTEM_FIX = (
+    '下面这段 Manim 代码在本地渲染时失败，附上了渲染错误。'
+    '请修正代码并只输出修正后的完整 Python 文件内容（定义 MainScene，'
+    '不要解释、不要 markdown 包裹）。'
+)
+
+
+def _strip_code_fence(text):
+    """去掉 DeepSeek 偶尔包在外的 ```python ... ``` 围栏，返回纯代码。"""
+    text = (text or '').strip()
+    if text.startswith('```'):
+        lines = text.split('\n')
+        if lines and lines[0].strip().startswith('```'):
+            lines = lines[1:]
+        while lines and lines[-1].strip() == '```':
+            lines = lines[:-1]
+        text = '\n'.join(lines)
+    return text.strip()
+
+
+def _deepseek_chat(messages, api_key, model, timeout=90):
+    """用标准库 urllib 调 DeepSeek chat completions（用户自己的 key）。"""
+    url = _getenv('DEEPSEEK_BASE_URL') or DEEPSEEK_DEFAULT_URL
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer %s' % api_key,
+        'User-Agent': '%s/%s' % (SERVER_NAME, SERVER_VERSION),
+    }
+    payload = {
+        'model': model,
+        'messages': messages,
+        'temperature': 0.7,
+        'stream': False,
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    request = urllib.request.Request(url, data=data, headers=headers, method='POST')
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        raw = _safe_read(exc)
+        raise BackendError('DeepSeek 返回错误 %s：%s' % (exc.code, raw[:200]))
+    except Exception as exc:
+        raise BackendError('调用 DeepSeek 失败：%s' % exc)
+    raw = response.read().decode('utf-8', 'replace')
+    parsed = _parse_json(raw)
+    if not isinstance(parsed, dict):
+        raise BackendError('DeepSeek 返回了非 JSON 内容（前 200 字）：%s' % raw[:200])
+    choices = parsed.get('choices') or []
+    if not choices:
+        reason = ''
+        err = parsed.get('error')
+        if isinstance(err, dict):
+            reason = err.get('message', '')
+        suffix = ('：' + reason) if reason else '（可能余额不足或触发内容过滤）'
+        raise BackendError('DeepSeek 未返回内容%s' % suffix)
+    return choices[0].get('message', {}).get('content', '') or ''
+
+
+def _deepseek_generate_code(prompt, api_key, model):
+    messages = [
+        {'role': 'system', 'content': _SYSTEM_GEN},
+        {'role': 'user', 'content': prompt},
+    ]
+    return _strip_code_fence(_deepseek_chat(messages, api_key, model))
+
+
+def _deepseek_fix_code(code, error_text, api_key, model):
+    messages = [
+        {'role': 'system', 'content': _SYSTEM_FIX},
+        {'role': 'user', 'content': '原始代码：\n```python\n%s\n```\n\n渲染错误：\n%s'
+         % (code, error_text[:3000])},
+    ]
+    return _strip_code_fence(_deepseek_chat(messages, api_key, model))
+
+
+def _find_mp4(root):
+    if not root or not os.path.isdir(root):
+        return None
+    for dirpath, _, filenames in os.walk(root):
+        for name in filenames:
+            if name.endswith('.mp4'):
+                return os.path.join(dirpath, name)
+    return None
+
+
+def _run_local_manim(code, ctx):
+    """写临时文件并用本机 manim 渲染。成功返回 (视频路径, None)，失败 (None, 错误)。"""
+    manim = shutil.which('manim') or shutil.which('manimce')
+    if not manim:
+        return None, '本地未检测到 manim。请先安装：pip install manim，并确认 manim 在 PATH 中。'
+    if not shutil.which('ffmpeg'):
+        return None, '本地未检测到 ffmpeg，Manim 渲染需要它（通常随 manim 依赖安装，或单独装）。'
+
+    work = tempfile.mkdtemp(prefix='sanhang_')
+    py_path = os.path.join(work, 'scene.py')
+    try:
+        with open(py_path, 'w') as handle:
+            handle.write(code)
+    except Exception as exc:
+        return None, '写入临时文件失败：%s' % exc
+
+    quality = (_getenv('LOCAL_QUALITY') or 'm').strip().lower()
+    if quality not in ('l', 'm', 'h', 'k'):
+        quality = 'm'
+    timeout = _env_float('LOCAL_TIMEOUT', 600, 30, 1800)
+    cmd = [manim, '-q' + quality, '--disable_caching', py_path, 'MainScene']
+    try:
+        proc = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, '本地 Manim 渲染超时（默认 600 秒，可用 SANHANG_LOCAL_TIMEOUT 调大）。'
+    if proc.returncode != 0:
+        return None, (proc.stderr or proc.stdout or '')[-1800:]
+    video = _find_mp4(os.path.join(work, 'media', 'videos'))
+    if not video:
+        return None, 'Manim 渲染结束但未找到 mp4 输出（检查 Manim 是否成功生成 MainScene）。'
+    return video, None
+
+
+def _tool_generate_local(args, ctx):
+    prompt = args.get('prompt')
+    if not isinstance(prompt, str) or not prompt.strip():
+        return _error('参数 prompt 必填，且必须是非空字符串。')
+    prompt = prompt.strip()
+    if len(prompt) > 1000:
+        return _error('参数 prompt 过长（本地模式同样建议控制在 1000 字符内），请精简描述。')
+
+    api_key = _getenv('DEEPSEEK_API_KEY') or _getenv('API_KEY')
+    if not api_key:
+        return _error(
+            '本地模式需要你自己的 DeepSeek API Key（全程不消耗作者资源）。\n'
+            '请设置环境变量：SANHANG_DEEPSEEK_API_KEY=sk-你的key\n'
+            '再启动本服务。')
+    model = _getenv('LOCAL_MODEL') or 'deepseek-chat'
+
+    _notify_progress(ctx, 5, 100, '正在调用 DeepSeek 生成 Manim 代码')
+    try:
+        code = _deepseek_generate_code(prompt, api_key, model)
+    except BackendError as exc:
+        return _error(str(exc))
+    if not code:
+        return _error('DeepSeek 未返回可执行代码（可能触发内容过滤或余额不足）。')
+
+    last_err = None
+    for attempt in (1, 2):
+        _notify_progress(ctx, 30 + attempt * 20, 100, '本地 Manim 渲染中（第 %d 次）' % attempt)
+        video, err = _run_local_manim(code, ctx)
+        if video:
+            path = os.path.abspath(video)
+            url = 'file://' + path
+            text = (
+                '本地渲染完成（使用你自己的 DeepSeek Key + 本机 Manim，未访问任何外部服务器）。\n\n'
+                '描述：%s\n\n'
+                '视频文件：%s\n\n'
+                'Manim 代码：\n\n%s'
+            ) % (prompt, url, _fence(code))
+            structured = {
+                'mode': 'local',
+                'video_path': path,
+                'video_url': url,
+                'manim_code': code,
+                'prompt': prompt,
+            }
+            return text, structured, False
+        last_err = err
+        if attempt == 1:
+            _notify_progress(ctx, 70, 100, '首次渲染失败，正在请求 DeepSeek 修正代码')
+            try:
+                fixed = _deepseek_fix_code(code, last_err or '未知错误', api_key, model)
+            except BackendError as exc:
+                return _error('渲染失败且无法请求修正：%s\n\n原始错误：\n%s'
+                              % (exc, (last_err or '')[:800]))
+            if not fixed:
+                break
+            code = fixed
+
+    return _error(
+        '本地 Manim 渲染失败（已尝试 AI 纠错一次）。\n\n'
+        '错误信息：\n%s\n\n代码：\n%s'
+        % ((last_err or '未知')[:1800], _fence(code)))
 
 
 # --------------------------------------------------------------------------- #
@@ -768,10 +1024,11 @@ def _negotiate_protocol(requested):
 
 
 INSTRUCTIONS = (
-    'sanhang_render 把数学描述渲染成 Manim 动画视频，无需本地安装 Manim / LaTeX。\n'
-    '典型用法：用户说“帮我把正弦函数画成动画”，调用 sanhang_render，传一句具体描述，'
-    '拿到 mp4 直链与 Manim 源码。\n'
-    '渲染通常 30~90 秒。若客户端有工具超时限制，把 wait 设为 false，再用 sanhang_task 轮询。\n'
+    'sanhang_render 把数学描述渲染成 Manim 动画视频。\n'
+    '运行模式由环境变量决定：SANHANG_LOCAL=1 用你自己的 DeepSeek Key + 本机 Manim 本地出片'
+    '（全程不访问作者服务器）；SANHANG_BASE_URL=你的后端 连接后端渲染；两者都不设则提示如何配置。\n'
+    '后端模式下，渲染通常 30~90 秒，若客户端有工具超时限制，把 wait 设为 false，再用 sanhang_task 轮询。\n'
+    '本地模式下渲染同步完成，直接返回本地视频文件路径。\n'
     '描述越具体（函数式、区间、要演示的动作、配色）成片越贴合预期。'
 )
 
@@ -936,7 +1193,13 @@ def _prepare_streams():
 
 def serve():
     _prepare_streams()
-    log('%s %s 启动，后端 %s' % (SERVER_NAME, SERVER_VERSION, CONFIG.base_url))
+    if CONFIG.mode == 'backend':
+        loc = '后端 ' + CONFIG.base_url
+    elif CONFIG.mode == 'local':
+        loc = '本地模式（自备 DeepSeek Key + 本地 Manim）'
+    else:
+        loc = '未配置（调用工具会提示如何配置 SanHANG_LOCAL 或 SANHANG_BASE_URL）'
+    log('%s %s 启动，模式 %s（%s）' % (SERVER_NAME, SERVER_VERSION, CONFIG.mode, loc))
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -972,12 +1235,30 @@ def main(argv=None):
         return 0
     if '--whoami' in argv:
         from_env = bool(_getenv('USER_IDENTIFIER'))
+        _print('mode: %s' % CONFIG.mode)
         _print('identifier: %s' % CONFIG.user_identifier)
         _print('source: %s' % ('环境变量' if from_env else '本机自动生成'))
         if not from_env:
             _print('file: %s' % os.path.join(_state_dir(), 'identifier'))
         return 0
     if '--check' in argv:
+        if CONFIG.mode == 'local':
+            _print('mode: local（自备 DeepSeek Key + 本地 Manim）')
+            api_key = _getenv('DEEPSEEK_API_KEY') or _getenv('API_KEY')
+            _print('DeepSeek API Key: %s' % ('已配置' if api_key else '未配置（需 SANHANG_DEEPSEEK_API_KEY）'))
+            manim = shutil.which('manim') or shutil.which('manimce')
+            ffmpeg = shutil.which('ffmpeg')
+            _print('manim: %s' % (manim or '未检测到'))
+            _print('ffmpeg: %s' % (ffmpeg or '未检测到'))
+            if api_key and manim and ffmpeg:
+                _print('OK 本地渲染链路就绪')
+                return 0
+            _print('FAIL 本地渲染依赖不全，请补齐上述缺少的项')
+            return 1
+        if CONFIG.mode == 'none':
+            _print('mode: none（未配置后端或本地模式）')
+            _print(_CONFIG_ERROR)
+            return 1
         try:
             health = _http_json('GET', '/health')
             _print('OK %s -> %s' % (CONFIG.base_url, json.dumps(health, ensure_ascii=False)[:300]))
